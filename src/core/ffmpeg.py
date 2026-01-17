@@ -103,7 +103,9 @@ class FFmpegProcessor:
         """Test if a GPU encoder actually works."""
         try:
             # Create a minimal test command
-            cmd = ["ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1"]
+            # Use 256x256 resolution - GPU encoders have minimum dimension requirements
+            # (NVENC requires at least 128x128, some require 256x256)
+            cmd = ["ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1"]
 
             if gpu_type == "vaapi":
                 # VAAPI needs device initialization
@@ -112,7 +114,7 @@ class FFmpegProcessor:
 
             cmd.extend(["-c:v", encoder, "-f", "null", "-"])
 
-            result = subprocess.run(cmd, capture_output=True, timeout=5)
+            result = subprocess.run(cmd, capture_output=True, timeout=10)
             return result.returncode == 0
         except Exception:
             return False
