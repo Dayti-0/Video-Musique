@@ -26,7 +26,7 @@ from ..utils.helpers import format_duration, get_file_size, create_tooltip
 class VideoMusiqueApp:
     """Main application class with modern UI."""
 
-    APP_TITLE = "Video-Musique"
+    APP_TITLE = "Mixeur Video Audio"
     MIN_WIDTH = 1100
     MIN_HEIGHT = 700
 
@@ -88,15 +88,9 @@ class VideoMusiqueApp:
 
         ttk.Label(
             title_frame,
-            text="Video-Musique",
+            text="Mixeur Video Audio",
             style="Title.TLabel"
         ).pack(side=tk.LEFT)
-
-        ttk.Label(
-            title_frame,
-            text="  |  Muxeur multi-videos / multi-audio",
-            style="Subtitle.TLabel"
-        ).pack(side=tk.LEFT, padx=(5, 0))
 
         # Menu buttons
         menu_frame = ttk.Frame(header)
