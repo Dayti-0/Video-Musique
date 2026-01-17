@@ -240,6 +240,14 @@ class AudioTrackPanel(MediaPanel):
             font=("Segoe UI", 9)
         ).pack(side=tk.LEFT, padx=(0, 10))
 
+        # Volume label (created before scale to avoid callback errors)
+        self.lbl_volume = ttk.Label(
+            vol_frame,
+            text="100%",
+            style="Card.TLabel",
+            width=5
+        )
+
         self.volume_scale = ttk.Scale(
             vol_frame,
             from_=0,
@@ -250,12 +258,6 @@ class AudioTrackPanel(MediaPanel):
         self.volume_scale.set(100)
         self.volume_scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self.lbl_volume = ttk.Label(
-            vol_frame,
-            text="100%",
-            style="Card.TLabel",
-            width=5
-        )
         self.lbl_volume.pack(side=tk.LEFT, padx=(10, 0))
 
         # Mute/Solo buttons
