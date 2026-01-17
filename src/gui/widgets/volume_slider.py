@@ -44,6 +44,15 @@ class VolumeSlider(ttk.Frame):
             font=("Segoe UI", 9)
         ).grid(row=0, column=0, sticky="w", padx=(0, 10))
 
+        # Value label (created before scale to avoid callback errors)
+        self.lbl_value = ttk.Label(
+            self,
+            text=f"{int(initial_value)}%",
+            style="Card.TLabel",
+            width=5
+        )
+        self.lbl_value.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
         # Scale
         self.scale = ttk.Scale(
             self,
@@ -54,15 +63,6 @@ class VolumeSlider(ttk.Frame):
         )
         self.scale.set(initial_value)
         self.scale.grid(row=0, column=1, sticky="ew")
-
-        # Value label
-        self.lbl_value = ttk.Label(
-            self,
-            text=f"{int(initial_value)}%",
-            style="Card.TLabel",
-            width=5
-        )
-        self.lbl_value.grid(row=0, column=2, sticky="e", padx=(10, 0))
 
     def _on_change(self, value: str) -> None:
         """Handle value change."""
