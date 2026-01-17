@@ -431,10 +431,13 @@ class FFmpegProcessor:
         cmd = ["ffmpeg", "-y"]
 
         # Add hardware acceleration input flags for GPU decoding
+        # Note: We only use -hwaccel without -hwaccel_output_format to allow
+        # automatic transfer to CPU for filter processing. The GPU encoder
+        # will still be used for output encoding.
         if gpu_type == "nvidia":
-            cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+            cmd.extend(["-hwaccel", "cuda"])
         elif gpu_type == "intel":
-            cmd.extend(["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"])
+            cmd.extend(["-hwaccel", "qsv"])
         elif gpu_type == "vaapi":
             cmd.extend(["-vaapi_device", "/dev/dri/renderD128"])
 
@@ -647,34 +650,43 @@ class FFmpegProcessor:
         """
         Create a preview file with optimized settings for speed.
         Returns the path to the temporary file, or None on failure.
+        Automatically falls back to CPU encoding if GPU fails.
         """
         fd, temp_path = tempfile.mkstemp(suffix=".mkv")
         os.close(fd)
 
-        # Use ultrafast preset for preview generation
-        cmd = self.build_export_command(
-            project, temp_path, clip_seconds,
-            use_gpu=use_gpu,
-            speed_preset="ultrafast"
-        )
+        # Try GPU first if requested, then fall back to CPU
+        attempts = [(use_gpu, "GPU"), (False, "CPU")] if use_gpu else [(False, "CPU")]
 
-        try:
-            # Use stderr to /dev/null for cleaner output
-            result = subprocess.call(
-                cmd,
-                stderr=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL
+        for try_gpu, mode in attempts:
+            # Use ultrafast preset for preview generation
+            cmd = self.build_export_command(
+                project, temp_path, clip_seconds,
+                use_gpu=try_gpu,
+                speed_preset="ultrafast"
             )
-            if result == 0:
-                return temp_path
-            else:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-                return None
-        except Exception:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            return None
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    stderr=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    timeout=300  # 5 minute timeout
+                )
+                if result.returncode == 0:
+                    return temp_path
+                # If GPU failed, try CPU fallback
+                if try_gpu and mode == "GPU":
+                    continue
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                pass
+
+        # All attempts failed
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return None
 
     def play_preview(self, file_path: str) -> Optional[subprocess.Popen]:
         """Play a preview file using ffplay or system default."""
