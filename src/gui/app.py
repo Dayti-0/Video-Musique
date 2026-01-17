@@ -395,6 +395,9 @@ class VideoMusiqueApp:
 
     def _on_track_volume_change(self, volume: float) -> None:
         """Handle track volume change."""
+        # Guard against callback during initialization
+        if not hasattr(self, 'audio_panel'):
+            return
         index = self.audio_panel.get_selection()
         if index is not None and index < len(self.project.audio_tracks):
             self.project.audio_tracks[index].volume = volume / 100.0
