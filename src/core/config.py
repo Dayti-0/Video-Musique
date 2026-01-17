@@ -26,6 +26,9 @@ class Config:
         "video_crossfade": 1.0,
         "music_volume": 70,
         "video_volume": 100,
+        # Performance settings
+        "use_gpu": True,
+        "speed_preset": "balanced",  # ultrafast, fast, balanced, quality
     }
 
     def __init__(self, config_file: Optional[Path] = None):

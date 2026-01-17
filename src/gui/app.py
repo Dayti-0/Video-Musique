@@ -256,6 +256,50 @@ class VideoMusiqueApp:
         self.spin_video_crossfade.insert(0, "1.0")
         self.spin_video_crossfade.pack(side=tk.LEFT, padx=(8, 0))
 
+        # Performance settings row
+        perf_frame = ttk.Frame(options_frame, style="Card.TFrame")
+        perf_frame.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+
+        # GPU acceleration checkbox
+        self.var_use_gpu = tk.BooleanVar(value=True)
+        gpu_info = self.ffmpeg.get_gpu_info()
+        gpu_text = f"Acceleration GPU ({gpu_info['type'].upper()})" if gpu_info['available'] else "Acceleration GPU (non disponible)"
+
+        self.chk_gpu = ttk.Checkbutton(
+            perf_frame,
+            text=gpu_text,
+            variable=self.var_use_gpu,
+            command=self._on_option_change,
+            state=tk.NORMAL if gpu_info['available'] else tk.DISABLED
+        )
+        self.chk_gpu.pack(side=tk.LEFT)
+
+        # Speed preset selector
+        ttk.Label(
+            perf_frame,
+            text="Vitesse:",
+            style="Card.TLabel",
+            font=("Segoe UI", 9)
+        ).pack(side=tk.LEFT, padx=(20, 5))
+
+        self.var_speed_preset = tk.StringVar(value="balanced")
+        speed_options = [
+            ("Rapide", "fast"),
+            ("Equilibre", "balanced"),
+            ("Qualite", "quality"),
+        ]
+
+        self.speed_combo = ttk.Combobox(
+            perf_frame,
+            textvariable=self.var_speed_preset,
+            values=[opt[0] for opt in speed_options],
+            width=12,
+            state="readonly"
+        )
+        self.speed_combo.set("Equilibre")
+        self.speed_combo.pack(side=tk.LEFT)
+        self.speed_combo.bind("<<ComboboxSelected>>", lambda e: self._on_speed_preset_change())
+
     def _build_footer(self) -> None:
         """Build the footer section with actions and progress."""
         footer = ttk.Frame(self.root)
@@ -386,6 +430,7 @@ class VideoMusiqueApp:
         self.project.settings.include_video_audio = self.var_include_video_audio.get()
         self.project.settings.include_music = self.var_include_music.get()
         self.project.settings.cut_music_at_end = self.var_cut_music.get()
+        self.project.settings.use_gpu = self.var_use_gpu.get()
 
         try:
             self.project.settings.audio_crossfade = float(self.spin_audio_crossfade.get())
@@ -398,6 +443,16 @@ class VideoMusiqueApp:
             pass
 
         self._update_durations()
+
+    def _on_speed_preset_change(self) -> None:
+        """Handle speed preset change."""
+        preset_map = {
+            "Rapide": "fast",
+            "Equilibre": "balanced",
+            "Qualite": "quality",
+        }
+        selected = self.speed_combo.get()
+        self.project.settings.speed_preset = preset_map.get(selected, "balanced")
 
     def _on_drop(self, event) -> None:
         """Handle drag and drop."""
@@ -419,7 +474,7 @@ class VideoMusiqueApp:
     # ─────────── Media Operations ───────────
 
     def _add_videos(self) -> None:
-        """Add video files."""
+        """Add video files with parallel duration detection."""
         files = filedialog.askopenfilenames(
             title="Ajouter des videos",
             filetypes=[("Videos", "*.mp4 *.mkv *.mov *.avi *.webm"), ("Tous", "*.*")],
@@ -428,13 +483,21 @@ class VideoMusiqueApp:
 
         if files:
             self.config.last_directory = os.path.dirname(files[0])
-            for f in files:
-                duration = self.ffmpeg.get_duration(f)
-                self.project.videos.append(VideoClip(path=f, duration=duration))
+
+            # Use parallel duration detection for multiple files
+            if len(files) > 1:
+                self.progress_panel.set_status("Analyse des videos...")
+                durations = self.ffmpeg.get_durations_parallel(list(files))
+                for f, duration in zip(files, durations):
+                    self.project.videos.append(VideoClip(path=f, duration=duration))
+            else:
+                duration = self.ffmpeg.get_duration(files[0])
+                self.project.videos.append(VideoClip(path=files[0], duration=duration))
 
             self._refresh_video_list()
             self._update_durations()
             self._update_button_states()
+            self.progress_panel.set_status("Pret")
 
     def _remove_video(self) -> None:
         """Remove selected video."""
@@ -459,7 +522,7 @@ class VideoMusiqueApp:
             self.video_panel.set_selection(new_index)
 
     def _add_audio(self) -> None:
-        """Add audio files."""
+        """Add audio files with parallel duration detection."""
         files = filedialog.askopenfilenames(
             title="Ajouter des musiques",
             filetypes=[("Audio", "*.mp3 *.wav *.flac *.aac *.ogg"), ("Tous", "*.*")],
@@ -468,12 +531,20 @@ class VideoMusiqueApp:
 
         if files:
             self.config.last_directory = os.path.dirname(files[0])
-            for f in files:
-                duration = self.ffmpeg.get_duration(f)
-                self.project.audio_tracks.append(AudioTrack(path=f, duration=duration))
+
+            # Use parallel duration detection for multiple files
+            if len(files) > 1:
+                self.progress_panel.set_status("Analyse des fichiers audio...")
+                durations = self.ffmpeg.get_durations_parallel(list(files))
+                for f, duration in zip(files, durations):
+                    self.project.audio_tracks.append(AudioTrack(path=f, duration=duration))
+            else:
+                duration = self.ffmpeg.get_duration(files[0])
+                self.project.audio_tracks.append(AudioTrack(path=files[0], duration=duration))
 
             self._refresh_audio_list()
             self._update_durations()
+            self.progress_panel.set_status("Pret")
 
     def _remove_audio(self) -> None:
         """Remove selected audio track."""
@@ -628,6 +699,15 @@ class VideoMusiqueApp:
         self.project.settings.cut_music_at_end = self.var_cut_music.get()
         self.project.settings.video_volume = self.volume_panel.get_video_volume()
         self.project.settings.music_volume = self.volume_panel.get_music_volume()
+        self.project.settings.use_gpu = self.var_use_gpu.get()
+
+        # Map speed preset from UI to internal value
+        preset_map = {
+            "Rapide": "fast",
+            "Equilibre": "balanced",
+            "Qualite": "quality",
+        }
+        self.project.settings.speed_preset = preset_map.get(self.speed_combo.get(), "balanced")
 
         try:
             self.project.settings.audio_crossfade = float(self.spin_audio_crossfade.get())
@@ -648,6 +728,18 @@ class VideoMusiqueApp:
         self.volume_panel.set_video_volume(s.video_volume)
         self.volume_panel.set_music_volume(s.music_volume)
 
+        # GPU and speed settings
+        gpu_info = self.ffmpeg.get_gpu_info()
+        if gpu_info['available']:
+            self.var_use_gpu.set(s.use_gpu)
+
+        preset_map = {
+            "fast": "Rapide",
+            "balanced": "Equilibre",
+            "quality": "Qualite",
+        }
+        self.speed_combo.set(preset_map.get(s.speed_preset, "Equilibre"))
+
         self.spin_audio_crossfade.delete(0, tk.END)
         self.spin_audio_crossfade.insert(0, str(int(s.audio_crossfade)))
 
@@ -661,6 +753,12 @@ class VideoMusiqueApp:
         self.var_cut_music.set(False)
         self.volume_panel.set_video_volume(100)
         self.volume_panel.set_music_volume(70)
+
+        # Reset performance settings
+        gpu_info = self.ffmpeg.get_gpu_info()
+        if gpu_info['available']:
+            self.var_use_gpu.set(True)
+        self.speed_combo.set("Equilibre")
 
         self.spin_audio_crossfade.delete(0, tk.END)
         self.spin_audio_crossfade.insert(0, "10")
@@ -689,12 +787,17 @@ class VideoMusiqueApp:
         ).start()
 
     def _build_preview(self, clip: bool) -> None:
-        """Build and play preview (runs in thread)."""
+        """Build and play preview (runs in thread) with GPU acceleration."""
         try:
             self._stop_preview()
 
             clip_seconds = 60 if clip else None
-            self.temp_preview = self.ffmpeg.create_preview(self.project, clip_seconds)
+            # Use GPU acceleration for faster preview generation
+            self.temp_preview = self.ffmpeg.create_preview(
+                self.project,
+                clip_seconds,
+                use_gpu=self.project.settings.use_gpu
+            )
 
             if self.temp_preview:
                 self.preview_active = True
@@ -781,22 +884,35 @@ class VideoMusiqueApp:
             ).start()
 
     def _run_export(self, output_path: str) -> None:
-        """Run export in background thread."""
+        """Run export in background thread with GPU acceleration support."""
         self.export_start = time.time()
         self.root.after(0, self._update_elapsed)
-        self.root.after(0, lambda: self.progress_panel.set_status("Export en cours..."))
+
+        # Show encoder info in status
+        use_gpu = self.project.settings.use_gpu
+        gpu_info = self.ffmpeg.get_gpu_info()
+        encoder_text = f"GPU {gpu_info['type'].upper()}" if (use_gpu and gpu_info['available']) else "CPU"
+        self.root.after(0, lambda: self.progress_panel.set_status(f"Export en cours ({encoder_text})..."))
         self.root.after(0, lambda: self.btn_export.config(state=tk.DISABLED))
         self.root.after(0, self.progress_panel.start_animation)
 
         def progress_callback(percent: float):
             self.root.after(0, lambda: self.progress_panel.set_progress(percent))
 
-        success = self.ffmpeg.export(self.project, output_path, progress_callback)
+        # Export with performance settings
+        success = self.ffmpeg.export(
+            self.project,
+            output_path,
+            progress_callback,
+            use_gpu=self.project.settings.use_gpu,
+            speed_preset=self.project.settings.speed_preset
+        )
 
         self.root.after(0, self._export_done)
 
         if success:
-            self.root.after(0, lambda: self.progress_panel.set_status("Export termine!"))
+            elapsed = time.time() - self.export_start
+            self.root.after(0, lambda: self.progress_panel.set_status(f"Export termine! ({elapsed:.1f}s)"))
         else:
             self.root.after(0, lambda: messagebox.showerror("Erreur", "L'export a echoue."))
 
