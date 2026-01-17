@@ -93,6 +93,9 @@ class ProjectSettings:
     cut_music_at_end: bool = False
     video_volume: float = 100.0
     music_volume: float = 70.0
+    # Performance settings
+    use_gpu: bool = True
+    speed_preset: str = "balanced"  # ultrafast, fast, balanced, quality
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
@@ -103,7 +106,9 @@ class ProjectSettings:
             "cross_fade_video": self.video_crossfade,
             "cut_music": self.cut_music_at_end,
             "video_volume": self.video_volume,
-            "music_volume": self.music_volume
+            "music_volume": self.music_volume,
+            "use_gpu": self.use_gpu,
+            "speed_preset": self.speed_preset,
         }
 
     @classmethod
@@ -116,7 +121,9 @@ class ProjectSettings:
             video_crossfade=data.get("cross_fade_video", 1.0),
             cut_music_at_end=data.get("cut_music", False),
             video_volume=min(data.get("video_volume", 100.0), 110.0),
-            music_volume=min(data.get("music_volume", 70.0), 110.0)
+            music_volume=min(data.get("music_volume", 70.0), 110.0),
+            use_gpu=data.get("use_gpu", True),
+            speed_preset=data.get("speed_preset", "balanced"),
         )
 
 
