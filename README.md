@@ -1,20 +1,35 @@
 # Video-Musique
 
-Application GUI moderne pour le mixage multi-vidéo / multi-audio avec support de l'accélération GPU.
+Application desktop moderne pour le mixage multi-video / multi-audio avec support de l'acceleration GPU.
 
-## Fonctionnalités
+**Version 2.0** - Reecrite en TypeScript + Tauri pour de meilleures performances et une interface utilisateur moderne.
 
-- **Assemblage vidéo** : Combinez plusieurs clips vidéo avec des transitions crossfade
-- **Mixage audio** : Superposez plusieurs pistes audio avec contrôle du volume
-- **Contrôles avancés** : Mute, Solo, et volume par piste
-- **Accélération GPU** : Support NVIDIA, AMD, Intel QSV et VAAPI
-- **Prévisualisation** : Preview rapide (60s) ou complète
+## Fonctionnalites
+
+- **Assemblage video** : Combinez plusieurs clips video avec des transitions crossfade
+- **Mixage audio** : Superposez plusieurs pistes audio avec controle du volume
+- **Controles avances** : Mute, Solo, et volume par piste
+- **Acceleration GPU** : Support NVIDIA, AMD, Intel QSV et VAAPI
+- **Previsualisation** : Preview rapide (60s) ou complete
 - **Export flexible** : MKV, MP4 ou WebM
+- **Interface moderne** : Theme sombre elegant avec Tailwind CSS
+- **Performance native** : Backend Rust via Tauri
 
-## Prérequis
+## Stack technique
 
-### Système
-- Python 3.10 ou supérieur
+| Composant | Technologie |
+|-----------|-------------|
+| Frontend | React 18 + TypeScript |
+| UI | Tailwind CSS |
+| Backend | Rust (Tauri 2.0) |
+| Etat | Zustand |
+| Build | Vite |
+
+## Prerequis
+
+### Systeme
+- Node.js 18+ et npm
+- Rust (pour le build)
 - FFmpeg (ffmpeg, ffprobe, ffplay pour la preview)
 
 ### Installation de FFmpeg
@@ -36,178 +51,179 @@ brew install ffmpeg
 ```
 
 **Windows**:
-1. Téléchargez FFmpeg depuis [ffmpeg.org](https://ffmpeg.org/download.html)
+1. Telechargez FFmpeg depuis [ffmpeg.org](https://ffmpeg.org/download.html)
 2. Extrayez l'archive
-3. Ajoutez le dossier `bin` à votre PATH
+3. Ajoutez le dossier `bin` a votre PATH
+
+### Installation de Rust
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 ## Installation
 
-1. **Cloner le dépôt**:
+1. **Cloner le depot**:
 ```bash
 git clone https://github.com/Dayti-0/Video-Musique.git
 cd Video-Musique
 ```
 
-2. **Créer un environnement virtuel** (recommandé):
+2. **Installer les dependances**:
 ```bash
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-# ou
-venv\Scripts\activate     # Windows
+npm install
 ```
 
-3. **Installer les dépendances**:
+3. **Lancer en mode developpement**:
 ```bash
-pip install -r requirements.txt
+npm run tauri dev
 ```
 
-4. **Lancer l'application**:
+4. **Construire l'application**:
 ```bash
-python main.py
+npm run tauri build
 ```
-
-Ou sous Windows, double-cliquez sur `start.bat`.
 
 ## Utilisation
 
-### Ajouter des médias
+### Ajouter des medias
 
-1. Cliquez sur **"+ Ajouter"** dans le panneau Vidéos ou Musiques
-2. Sélectionnez vos fichiers
-3. Réorganisez l'ordre avec les boutons **↑** et **↓**
+1. Cliquez sur **"+ Ajouter"** dans le panneau Videos ou Musiques
+2. Selectionnez vos fichiers
+3. Reorganisez l'ordre avec les boutons de deplacement
 
-### Contrôles audio
+### Controles audio
 
-- **Volume par piste** : Utilisez le slider après avoir sélectionné une piste
-- **Mute (M)** : Désactive une piste
+- **Volume par piste** : Utilisez le slider pour ajuster le volume (0-110%)
+- **Mute (M)** : Desactive une piste
 - **Solo (S)** : Joue uniquement les pistes en mode Solo
 
-### Options
+### Parametres
 
 | Option | Description |
 |--------|-------------|
-| Audio des vidéos | Inclure l'audio original des vidéos |
-| Musiques | Inclure les pistes audio ajoutées |
-| Couper musique à la fin | Arrêter la musique à la fin de la vidéo |
-| Cross-fade audio | Durée du fondu enchaîné audio (1-20s) |
-| Cross-fade vidéo | Durée du fondu enchaîné vidéo (0-5s) |
-| Accélération GPU | Utiliser le GPU pour l'encodage |
-| Vitesse | Préréglage de vitesse d'encodage |
+| Audio des videos | Inclure l'audio original des videos |
+| Musiques | Inclure les pistes audio ajoutees |
+| Couper musique a la fin | Arreter la musique a la fin de la video |
+| Cross-fade audio | Duree du fondu enchaine audio (1-20s) |
+| Cross-fade video | Duree du fondu enchaine video (0-5s) |
+| Acceleration GPU | Utiliser le GPU pour l'encodage |
+| Vitesse | Prereglage de vitesse d'encodage |
 
-### Prévisualisation
+### Previsualisation
 
-- **Preview 60s** : Génère une prévisualisation des 60 premières secondes
-- **Preview complet** : Génère une prévisualisation complète
-- **Stop** : Arrête la prévisualisation en cours
+- **Preview 60s** : Genere une previsualisation des 60 premieres secondes
+- **Preview complete** : Genere une previsualisation complete
 
 ### Export
 
-1. Cliquez sur **"Exporter"**
-2. Choisissez le format de sortie (MKV, MP4, WebM)
-3. Sélectionnez l'emplacement de sauvegarde
-4. Cliquez sur **"Annuler"** pour interrompre l'export si nécessaire
+1. Choisissez le format de sortie (MKV, MP4, WebM)
+2. Cliquez sur **"Exporter"**
+3. Selectionnez l'emplacement de sauvegarde
+4. Cliquez sur **"Annuler"** pour interrompre l'export si necessaire
 
-## Formats supportés
+## Formats supportes
 
-### Vidéo (entrée)
+### Video (entree)
 - MP4, MKV, MOV, AVI, WebM
 
-### Audio (entrée)
+### Audio (entree)
 - MP3, WAV, FLAC, AAC, OGG
 
 ### Export
-- MKV (Matroska) - Recommandé
+- MKV (Matroska) - Recommande
 - MP4 (H.264/AAC)
 - WebM (VP9/Vorbis)
 
-## Accélération GPU
+## Acceleration GPU
 
-L'application détecte automatiquement le GPU disponible :
+L'application detecte automatiquement le GPU disponible :
 
-| GPU | Encodeur | Priorité |
+| GPU | Encodeur | Priorite |
 |-----|----------|----------|
 | NVIDIA | h264_nvenc | 1 (plus haute) |
 | Intel | h264_qsv | 2 |
 | AMD | h264_amf | 3 |
 | VAAPI | h264_vaapi | 4 |
 
-Si l'encodage GPU échoue, l'application bascule automatiquement sur l'encodage CPU.
+Si l'encodage GPU echoue, l'application bascule automatiquement sur l'encodage CPU.
 
 ## Fichiers de projet
 
-Les projets sont sauvegardés au format `.mixproj` (JSON). Ils contiennent :
-- Liste des vidéos et leurs chemins
+Les projets sont sauvegardes au format `.mixproj` (JSON). Ils contiennent :
+- Liste des videos et leurs chemins
 - Liste des pistes audio avec volume/mute/solo
-- Paramètres du projet
-
-## Logs
-
-Les fichiers de log sont stockés dans :
-- **Linux/macOS** : `~/.video_musique/logs/`
-- **Windows** : `%USERPROFILE%\.video_musique\logs\`
-
-Les logs plus anciens que 7 jours sont automatiquement supprimés.
-
-## Tests
-
-Exécuter les tests :
-```bash
-pytest tests/ -v
-```
-
-Avec couverture :
-```bash
-pytest tests/ -v --cov=src --cov-report=term-missing
-```
+- Parametres du projet
 
 ## Structure du projet
 
 ```
 Video-Musique/
-├── main.py                 # Point d'entrée
-├── start.bat              # Lanceur Windows
-├── requirements.txt       # Dépendances Python
-├── README.md             # Documentation
+├── package.json           # Dependances npm
+├── vite.config.ts        # Configuration Vite
+├── tailwind.config.js    # Configuration Tailwind
+├── tsconfig.json         # Configuration TypeScript
+├── index.html            # Point d'entree HTML
 ├── src/
-│   ├── core/
-│   │   ├── models.py     # Modèles de données
-│   │   ├── ffmpeg.py     # Opérations FFmpeg
-│   │   └── config.py     # Configuration
-│   ├── gui/
-│   │   ├── app.py        # Application principale
-│   │   ├── theme.py      # Thème visuel
-│   │   └── widgets/      # Composants UI
-│   └── utils/
-│       ├── helpers.py    # Fonctions utilitaires
-│       └── logger.py     # Système de logging
-└── tests/                # Tests unitaires
+│   ├── main.tsx          # Point d'entree React
+│   ├── App.tsx           # Composant principal
+│   ├── components/       # Composants React
+│   │   ├── Header.tsx
+│   │   ├── VideoPanel.tsx
+│   │   ├── AudioPanel.tsx
+│   │   ├── SettingsPanel.tsx
+│   │   ├── ExportPanel.tsx
+│   │   └── StatusBar.tsx
+│   ├── store/
+│   │   └── useStore.ts   # Store Zustand
+│   ├── types/
+│   │   └── index.ts      # Types TypeScript
+│   └── styles/
+│       └── index.css     # Styles Tailwind
+└── src-tauri/
+    ├── Cargo.toml        # Dependances Rust
+    ├── tauri.conf.json   # Configuration Tauri
+    └── src/
+        ├── main.rs       # Point d'entree Rust
+        ├── lib.rs        # Module principal
+        ├── ffmpeg.rs     # Operations FFmpeg
+        └── models.rs     # Modeles de donnees
 ```
 
-## Dépannage
+## Depannage
 
-### FFmpeg non trouvé
-Vérifiez que FFmpeg est installé et dans votre PATH :
+### FFmpeg non trouve
+Verifiez que FFmpeg est installe et dans votre PATH :
 ```bash
 ffmpeg -version
 ```
 
 ### Preview ne fonctionne pas
-- Vérifiez que ffplay est installé
-- Consultez les logs pour plus de détails
+- Verifiez que ffplay est installe
+- Consultez la console pour plus de details
 
-### Encodage GPU échoue
-- Mettez à jour vos pilotes GPU
-- Vérifiez que votre GPU supporte l'encodage H.264
+### Encodage GPU echoue
+- Mettez a jour vos pilotes GPU
+- Verifiez que votre GPU supporte l'encodage H.264
 - L'application basculera automatiquement sur CPU
 
 ### L'export est lent
-- Activez l'accélération GPU si disponible
-- Utilisez le préréglage "Rapide" au lieu de "Qualité"
+- Activez l'acceleration GPU si disponible
+- Utilisez le prereglage "Rapide" au lieu de "Qualite"
+
+## Scripts npm
+
+| Commande | Description |
+|----------|-------------|
+| `npm run dev` | Lance le serveur de developpement |
+| `npm run build` | Build le frontend |
+| `npm run tauri dev` | Lance l'app en mode developpement |
+| `npm run tauri build` | Build l'application pour la distribution |
 
 ## Licence
 
-MIT License - Voir le fichier LICENSE pour plus de détails.
+MIT License - Voir le fichier LICENSE pour plus de details.
 
 ## Contribution
 
-Les contributions sont les bienvenues ! N'hésitez pas à ouvrir une issue ou une pull request.
+Les contributions sont les bienvenues ! N'hesitez pas a ouvrir une issue ou une pull request.
