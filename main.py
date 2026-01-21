@@ -34,16 +34,27 @@ import tkinter as tk
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from src.gui.app import VideoMusiqueApp
+from src.utils.logger import get_logger
 
 
 def main():
     """Main entry point."""
+    # Initialize logging
+    logger = get_logger()
+    logger.enable_file_logging()
+    logger.cleanup_old_logs(max_days=7)
+    logger.info("Video-Musique starting...")
+
     # Handle SIGINT gracefully on Windows
     if os.name == "nt":
         signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    # Suppress Tk callback exceptions in console
-    tk.Tk.report_callback_exception = lambda *e: print("Tk error:", *e, file=sys.stderr)
+    # Suppress Tk callback exceptions in console (but log them)
+    def handle_tk_error(exc_type, exc_value, exc_tb):
+        logger.exception(f"Tk callback error: {exc_value}")
+        print("Tk error:", exc_type, exc_value, file=sys.stderr)
+
+    tk.Tk.report_callback_exception = handle_tk_error
 
     # Try to use tkinterdnd2 for drag-drop support, fallback to standard Tk
     try:
