@@ -6,9 +6,6 @@ Modern and intuitive interface
 from __future__ import annotations
 
 import os
-import subprocess
-import threading
-import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -18,10 +15,16 @@ from .theme import Theme, Colors
 from .widgets.media_panel import MediaPanel, AudioTrackPanel
 from .widgets.volume_slider import DualVolumePanel
 from .widgets.progress_panel import ProgressPanel, DurationPanel
-from ..core.models import AudioTrack, VideoClip, Project, ProjectSettings
+from .controllers import (
+    PreviewController,
+    ExportController,
+    ProjectController,
+    MediaController,
+)
+from ..core.models import AudioTrack, VideoClip, Project
 from ..core.ffmpeg import FFmpegProcessor
-from ..core.config import Config, ProjectManager
-from ..utils.helpers import format_duration, get_file_size, create_tooltip
+from ..core.config import Config
+from ..utils.helpers import format_duration, get_file_size
 from ..utils.logger import get_logger
 
 
@@ -37,28 +40,20 @@ class VideoMusiqueApp:
         self.root.title(self.APP_TITLE)
         self.root.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
 
-        # Initialize components
+        # Initialize core components
         self.config = Config()
         self.ffmpeg = FFmpegProcessor()
         self.project = Project()
-
-        # State
-        self.preview_active = False
-        self.preview_process: Optional[subprocess.Popen] = None
-        self.temp_preview: Optional[str] = None
-        self.export_start: Optional[float] = None
-        self._elapsed_job: Optional[str] = None
-        self._export_cancelled = False
-        self._export_process: Optional[subprocess.Popen] = None
         self._logger = get_logger()
+
+        # Initialize controllers
+        self._init_controllers()
 
         # Cleanup temp files on start
         FFmpegProcessor.cleanup_temp_files()
 
-        # Setup theme
+        # Setup theme and build UI
         self.theme = Theme(root)
-
-        # Build UI
         self._build_ui()
 
         # Set window size from config
@@ -70,6 +65,37 @@ class VideoMusiqueApp:
 
         # Setup drag & drop if available
         self._setup_drag_drop()
+
+    def _init_controllers(self) -> None:
+        """Initialize all controllers."""
+        ui_callback = lambda func: self.root.after(0, func)
+
+        # Preview controller
+        self.preview_ctrl = PreviewController(self.ffmpeg, ui_callback)
+        self.preview_ctrl.on_status_change = lambda s: self.progress_panel.set_status(s)
+        self.preview_ctrl.on_start = self._on_preview_start
+        self.preview_ctrl.on_stop = self._on_preview_stop
+        self.preview_ctrl.on_error = lambda t, m: messagebox.showerror(t, m)
+
+        # Export controller
+        self.export_ctrl = ExportController(self.ffmpeg, ui_callback)
+        self.export_ctrl.set_root(self.root)
+        self.export_ctrl.on_progress = lambda p: self.progress_panel.set_progress(p)
+        self.export_ctrl.on_status_change = lambda s: self.progress_panel.set_status(s)
+        self.export_ctrl.on_time_update = lambda t: self.progress_panel.set_time(t)
+        self.export_ctrl.on_start = self._on_export_start
+        self.export_ctrl.on_error = lambda t, m: messagebox.showerror(t, m)
+
+        # Project controller
+        self.project_ctrl = ProjectController(self.ffmpeg, self.config, ui_callback)
+        self.project_ctrl.on_status_change = lambda s: self.progress_panel.set_status(s)
+        self.project_ctrl.on_error = lambda t, m: messagebox.showerror(t, m)
+
+        # Media controller
+        self.media_ctrl = MediaController(self.ffmpeg, self.config)
+        self.media_ctrl.on_status_change = lambda s: self.progress_panel.set_status(s)
+
+    # ─────────── UI Building ───────────
 
     def _build_ui(self) -> None:
         """Build the main user interface."""
@@ -90,40 +116,18 @@ class VideoMusiqueApp:
         # App title
         title_frame = ttk.Frame(header)
         title_frame.grid(row=0, column=0, sticky="w")
-
-        ttk.Label(
-            title_frame,
-            text="Mixeur Video Audio",
-            style="Title.TLabel"
-        ).pack(side=tk.LEFT)
+        ttk.Label(title_frame, text="Mixeur Video Audio", style="Title.TLabel").pack(side=tk.LEFT)
 
         # Menu buttons
         menu_frame = ttk.Frame(header)
         menu_frame.grid(row=0, column=2, sticky="e")
 
-        self.btn_new = ttk.Button(
-            menu_frame,
-            text="Nouveau",
-            style="Secondary.TButton",
-            command=self._new_project
-        )
-        self.btn_new.pack(side=tk.LEFT, padx=3)
-
-        self.btn_open = ttk.Button(
-            menu_frame,
-            text="Ouvrir",
-            style="Secondary.TButton",
-            command=self._load_project
-        )
-        self.btn_open.pack(side=tk.LEFT, padx=3)
-
-        self.btn_save = ttk.Button(
-            menu_frame,
-            text="Sauvegarder",
-            style="Secondary.TButton",
-            command=self._save_project
-        )
-        self.btn_save.pack(side=tk.LEFT, padx=3)
+        ttk.Button(menu_frame, text="Nouveau", style="Secondary.TButton",
+                   command=self._new_project).pack(side=tk.LEFT, padx=3)
+        ttk.Button(menu_frame, text="Ouvrir", style="Secondary.TButton",
+                   command=self._load_project).pack(side=tk.LEFT, padx=3)
+        ttk.Button(menu_frame, text="Sauvegarder", style="Secondary.TButton",
+                   command=self._save_project).pack(side=tk.LEFT, padx=3)
 
     def _build_main_content(self) -> None:
         """Build the main content area with media panels."""
@@ -135,9 +139,7 @@ class VideoMusiqueApp:
 
         # Video panel
         self.video_panel = MediaPanel(
-            main,
-            title="Videos",
-            media_type="video",
+            main, title="Videos", media_type="video",
             on_selection_change=self._on_video_select,
             on_add=self._add_videos,
             on_remove=self._remove_video,
@@ -174,126 +176,92 @@ class VideoMusiqueApp:
         self.volume_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
         # Right column: Options
-        options_frame = ttk.Frame(controls, style="Card.TFrame", padding=15)
+        self._build_options_panel(controls)
+
+    def _build_options_panel(self, parent: ttk.Frame) -> None:
+        """Build the options panel."""
+        options_frame = ttk.Frame(parent, style="Card.TFrame", padding=15)
         options_frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
-        ttk.Label(
-            options_frame,
-            text="Options",
-            style="Card.TLabel",
-            font=("Segoe UI", 11, "bold"),
-            foreground=Colors.ACCENT_PRIMARY
-        ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+        ttk.Label(options_frame, text="Options", style="Card.TLabel",
+                  font=("Segoe UI", 11, "bold"),
+                  foreground=Colors.ACCENT_PRIMARY).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
 
         # Checkboxes
         self.var_include_video_audio = tk.BooleanVar(value=True)
         self.var_include_music = tk.BooleanVar(value=True)
         self.var_cut_music = tk.BooleanVar(value=False)
 
-        ttk.Checkbutton(
-            options_frame,
-            text="Audio des videos",
-            variable=self.var_include_video_audio,
-            command=self._on_option_change
-        ).grid(row=1, column=0, sticky="w", pady=2)
-
-        ttk.Checkbutton(
-            options_frame,
-            text="Musiques",
-            variable=self.var_include_music,
-            command=self._on_option_change
-        ).grid(row=1, column=1, sticky="w", padx=(15, 0), pady=2)
-
-        ttk.Checkbutton(
-            options_frame,
-            text="Couper musique a la fin",
-            variable=self.var_cut_music,
-            command=self._on_option_change
-        ).grid(row=1, column=2, sticky="w", padx=(15, 0), pady=2)
+        ttk.Checkbutton(options_frame, text="Audio des videos",
+                        variable=self.var_include_video_audio,
+                        command=self._on_option_change).grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Checkbutton(options_frame, text="Musiques",
+                        variable=self.var_include_music,
+                        command=self._on_option_change).grid(row=1, column=1, sticky="w", padx=(15, 0), pady=2)
+        ttk.Checkbutton(options_frame, text="Couper musique a la fin",
+                        variable=self.var_cut_music,
+                        command=self._on_option_change).grid(row=1, column=2, sticky="w", padx=(15, 0), pady=2)
 
         # Crossfade controls
-        crossfade_frame = ttk.Frame(options_frame, style="Card.TFrame")
+        self._build_crossfade_controls(options_frame)
+
+        # Performance settings
+        self._build_performance_controls(options_frame)
+
+    def _build_crossfade_controls(self, parent: ttk.Frame) -> None:
+        """Build crossfade control widgets."""
+        crossfade_frame = ttk.Frame(parent, style="Card.TFrame")
         crossfade_frame.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
 
-        ttk.Label(
-            crossfade_frame,
-            text="Cross-fade audio (s):",
-            style="Card.TLabel",
-            font=("Segoe UI", 9)
-        ).pack(side=tk.LEFT)
-
         spinbox_config = Theme.get_spinbox_config()
+
+        ttk.Label(crossfade_frame, text="Cross-fade audio (s):", style="Card.TLabel",
+                  font=("Segoe UI", 9)).pack(side=tk.LEFT)
+
         self.spin_audio_crossfade = tk.Spinbox(
-            crossfade_frame,
-            from_=1,
-            to=20,
-            width=4,
-            command=self._on_option_change,
-            **spinbox_config
+            crossfade_frame, from_=1, to=20, width=4,
+            command=self._on_option_change, **spinbox_config
         )
         self.spin_audio_crossfade.delete(0, tk.END)
         self.spin_audio_crossfade.insert(0, "10")
         self.spin_audio_crossfade.pack(side=tk.LEFT, padx=(8, 20))
 
-        ttk.Label(
-            crossfade_frame,
-            text="Cross-fade video (s):",
-            style="Card.TLabel",
-            font=("Segoe UI", 9)
-        ).pack(side=tk.LEFT)
+        ttk.Label(crossfade_frame, text="Cross-fade video (s):", style="Card.TLabel",
+                  font=("Segoe UI", 9)).pack(side=tk.LEFT)
 
         self.spin_video_crossfade = tk.Spinbox(
-            crossfade_frame,
-            from_=0.0,
-            to=5.0,
-            increment=0.5,
-            width=4,
-            command=self._on_option_change,
-            **spinbox_config
+            crossfade_frame, from_=0.0, to=5.0, increment=0.5, width=4,
+            command=self._on_option_change, **spinbox_config
         )
         self.spin_video_crossfade.delete(0, tk.END)
         self.spin_video_crossfade.insert(0, "1.0")
         self.spin_video_crossfade.pack(side=tk.LEFT, padx=(8, 0))
 
-        # Performance settings row
-        perf_frame = ttk.Frame(options_frame, style="Card.TFrame")
+    def _build_performance_controls(self, parent: ttk.Frame) -> None:
+        """Build performance control widgets."""
+        perf_frame = ttk.Frame(parent, style="Card.TFrame")
         perf_frame.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
 
-        # GPU acceleration checkbox
+        # GPU acceleration
         self.var_use_gpu = tk.BooleanVar(value=True)
         gpu_info = self.ffmpeg.get_gpu_info()
         gpu_text = f"Acceleration GPU ({gpu_info['type'].upper()})" if gpu_info['available'] else "Acceleration GPU (non disponible)"
 
         self.chk_gpu = ttk.Checkbutton(
-            perf_frame,
-            text=gpu_text,
-            variable=self.var_use_gpu,
+            perf_frame, text=gpu_text, variable=self.var_use_gpu,
             command=self._on_option_change,
             state=tk.NORMAL if gpu_info['available'] else tk.DISABLED
         )
         self.chk_gpu.pack(side=tk.LEFT)
 
-        # Speed preset selector
-        ttk.Label(
-            perf_frame,
-            text="Vitesse:",
-            style="Card.TLabel",
-            font=("Segoe UI", 9)
-        ).pack(side=tk.LEFT, padx=(20, 5))
+        # Speed preset
+        ttk.Label(perf_frame, text="Vitesse:", style="Card.TLabel",
+                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(20, 5))
 
         self.var_speed_preset = tk.StringVar(value="balanced")
-        speed_options = [
-            ("Rapide", "fast"),
-            ("Equilibre", "balanced"),
-            ("Qualite", "quality"),
-        ]
-
         self.speed_combo = ttk.Combobox(
-            perf_frame,
-            textvariable=self.var_speed_preset,
-            values=[opt[0] for opt in speed_options],
-            width=12,
-            state="readonly"
+            perf_frame, textvariable=self.var_speed_preset,
+            values=["Rapide", "Equilibre", "Qualite"], width=12, state="readonly"
         )
         self.speed_combo.set("Equilibre")
         self.speed_combo.pack(side=tk.LEFT)
@@ -319,50 +287,35 @@ class VideoMusiqueApp:
         preview_frame.grid(row=0, column=0, sticky="w")
 
         self.btn_preview_short = ttk.Button(
-            preview_frame,
-            text="Preview 60s",
-            style="Secondary.TButton",
-            command=lambda: self._play_preview(clip=True),
-            state=tk.DISABLED
+            preview_frame, text="Preview 60s", style="Secondary.TButton",
+            command=lambda: self._play_preview(clip=True), state=tk.DISABLED
         )
         self.btn_preview_short.pack(side=tk.LEFT, padx=(0, 8))
 
         self.btn_preview_full = ttk.Button(
-            preview_frame,
-            text="Preview complet",
-            style="Secondary.TButton",
-            command=lambda: self._play_preview(clip=False),
-            state=tk.DISABLED
+            preview_frame, text="Preview complet", style="Secondary.TButton",
+            command=lambda: self._play_preview(clip=False), state=tk.DISABLED
         )
         self.btn_preview_full.pack(side=tk.LEFT, padx=(0, 8))
 
         self.btn_stop_preview = ttk.Button(
-            preview_frame,
-            text="Stop",
-            style="Danger.TButton",
-            command=self._stop_preview,
-            state=tk.DISABLED
+            preview_frame, text="Stop", style="Danger.TButton",
+            command=self._stop_preview, state=tk.DISABLED
         )
         self.btn_stop_preview.pack(side=tk.LEFT)
 
-        # Export buttons frame
+        # Export buttons
         export_frame = ttk.Frame(action_frame, style="Card.TFrame")
         export_frame.grid(row=0, column=3, sticky="e")
 
         self.btn_export = ttk.Button(
-            export_frame,
-            text="Exporter",
-            command=self._export,
-            state=tk.DISABLED
+            export_frame, text="Exporter", command=self._export, state=tk.DISABLED
         )
         self.btn_export.pack(side=tk.LEFT, padx=(0, 8))
 
         self.btn_cancel_export = ttk.Button(
-            export_frame,
-            text="Annuler",
-            style="Danger.TButton",
-            command=self._cancel_export,
-            state=tk.DISABLED
+            export_frame, text="Annuler", style="Danger.TButton",
+            command=self._cancel_export, state=tk.DISABLED
         )
         self.btn_cancel_export.pack(side=tk.LEFT)
 
@@ -406,7 +359,6 @@ class VideoMusiqueApp:
 
     def _on_track_volume_change(self, volume: float) -> None:
         """Handle track volume change."""
-        # Guard against callback during initialization
         if not hasattr(self, 'audio_panel'):
             return
         index = self.audio_panel.get_selection()
@@ -417,8 +369,7 @@ class VideoMusiqueApp:
         """Handle mute toggle."""
         index = self.audio_panel.get_selection()
         if index is not None and index < len(self.project.audio_tracks):
-            track = self.project.audio_tracks[index]
-            track.mute = not track.mute
+            self.project.audio_tracks[index].mute = not self.project.audio_tracks[index].mute
             self._refresh_audio_list()
             self._update_durations()
 
@@ -426,8 +377,7 @@ class VideoMusiqueApp:
         """Handle solo toggle."""
         index = self.audio_panel.get_selection()
         if index is not None and index < len(self.project.audio_tracks):
-            track = self.project.audio_tracks[index]
-            track.solo = not track.solo
+            self.project.audio_tracks[index].solo = not self.project.audio_tracks[index].solo
             self._refresh_audio_list()
             self._update_durations()
 
@@ -460,142 +410,73 @@ class VideoMusiqueApp:
 
     def _on_speed_preset_change(self) -> None:
         """Handle speed preset change."""
-        preset_map = {
-            "Rapide": "fast",
-            "Equilibre": "balanced",
-            "Qualite": "quality",
-        }
-        selected = self.speed_combo.get()
-        self.project.settings.speed_preset = preset_map.get(selected, "balanced")
+        preset_map = {"Rapide": "fast", "Equilibre": "balanced", "Qualite": "quality"}
+        self.project.settings.speed_preset = preset_map.get(self.speed_combo.get(), "balanced")
 
     def _on_drop(self, event) -> None:
         """Handle drag and drop."""
-        files = event.data.strip("{}").split("} {")
-        for f in files:
-            ext = Path(f).suffix.lower()
-            if ext in FFmpegProcessor.SUPPORTED_VIDEO:
-                duration = self.ffmpeg.get_duration(f)
-                self.project.videos.append(VideoClip(path=f, duration=duration))
-            elif ext in FFmpegProcessor.SUPPORTED_AUDIO:
-                duration = self.ffmpeg.get_duration(f)
-                self.project.audio_tracks.append(AudioTrack(path=f, duration=duration))
-
-        self._refresh_video_list()
-        self._refresh_audio_list()
-        self._update_durations()
-        self._update_button_states()
+        if self.media_ctrl.handle_drop(self.project, event):
+            self._refresh_all()
 
     # ─────────── Media Operations ───────────
 
     def _add_videos(self) -> None:
-        """Add video files with parallel duration detection."""
-        files = filedialog.askopenfilenames(
-            title="Ajouter des videos",
-            filetypes=[("Videos", "*.mp4 *.mkv *.mov *.avi *.webm"), ("Tous", "*.*")],
-            initialdir=self.config.last_directory
-        )
-
-        if files:
-            self.config.last_directory = os.path.dirname(files[0])
-
-            # Use parallel duration detection for multiple files
-            if len(files) > 1:
-                self.progress_panel.set_status("Analyse des videos...")
-                durations = self.ffmpeg.get_durations_parallel(list(files))
-                for f, duration in zip(files, durations):
-                    self.project.videos.append(VideoClip(path=f, duration=duration))
-            else:
-                duration = self.ffmpeg.get_duration(files[0])
-                self.project.videos.append(VideoClip(path=files[0], duration=duration))
-
-            self._refresh_video_list()
-            self._update_durations()
-            self._update_button_states()
-            self.progress_panel.set_status("Pret")
+        """Add video files."""
+        if self.media_ctrl.add_videos(self.project):
+            self._refresh_all()
 
     def _remove_video(self) -> None:
         """Remove selected video."""
-        index = self.video_panel.get_selection()
-        if index is not None and index < len(self.project.videos):
-            del self.project.videos[index]
-            self._refresh_video_list()
-            self._update_durations()
-            self._update_button_states()
+        if self.media_ctrl.remove_video(self.project, self.video_panel.get_selection()):
+            self._refresh_all()
 
     def _move_video(self, direction: int) -> None:
         """Move video in list."""
-        index = self.video_panel.get_selection()
-        if index is None:
-            return
-
-        new_index = index + direction
-        if 0 <= new_index < len(self.project.videos):
-            videos = self.project.videos
-            videos[index], videos[new_index] = videos[new_index], videos[index]
+        new_index = self.media_ctrl.move_video(self.project, self.video_panel.get_selection(), direction)
+        if new_index is not None:
             self._refresh_video_list()
             self.video_panel.set_selection(new_index)
 
     def _add_audio(self) -> None:
-        """Add audio files with parallel duration detection."""
-        files = filedialog.askopenfilenames(
-            title="Ajouter des musiques",
-            filetypes=[("Audio", "*.mp3 *.wav *.flac *.aac *.ogg"), ("Tous", "*.*")],
-            initialdir=self.config.last_directory
-        )
-
-        if files:
-            self.config.last_directory = os.path.dirname(files[0])
-
-            # Use parallel duration detection for multiple files
-            if len(files) > 1:
-                self.progress_panel.set_status("Analyse des fichiers audio...")
-                durations = self.ffmpeg.get_durations_parallel(list(files))
-                for f, duration in zip(files, durations):
-                    self.project.audio_tracks.append(AudioTrack(path=f, duration=duration))
-            else:
-                duration = self.ffmpeg.get_duration(files[0])
-                self.project.audio_tracks.append(AudioTrack(path=files[0], duration=duration))
-
+        """Add audio files."""
+        if self.media_ctrl.add_audio(self.project):
             self._refresh_audio_list()
             self._update_durations()
-            self.progress_panel.set_status("Pret")
 
     def _remove_audio(self) -> None:
         """Remove selected audio track."""
-        index = self.audio_panel.get_selection()
-        if index is not None and index < len(self.project.audio_tracks):
-            del self.project.audio_tracks[index]
+        if self.media_ctrl.remove_audio(self.project, self.audio_panel.get_selection()):
             self._refresh_audio_list()
             self._update_durations()
 
     def _move_audio(self, direction: int) -> None:
         """Move audio track in list."""
-        index = self.audio_panel.get_selection()
-        if index is None:
-            return
-
-        new_index = index + direction
-        if 0 <= new_index < len(self.project.audio_tracks):
-            tracks = self.project.audio_tracks
-            tracks[index], tracks[new_index] = tracks[new_index], tracks[index]
+        new_index = self.media_ctrl.move_audio(self.project, self.audio_panel.get_selection(), direction)
+        if new_index is not None:
             self._refresh_audio_list()
             self.audio_panel.set_selection(new_index)
 
     # ─────────── UI Updates ───────────
 
+    def _refresh_all(self) -> None:
+        """Refresh all UI elements."""
+        self._refresh_video_list()
+        self._refresh_audio_list()
+        self._update_durations()
+        self._update_button_states()
+
     def _refresh_video_list(self) -> None:
         """Refresh the video list display."""
-        def format_video(v: VideoClip) -> str:
-            return f"{v.name}  ({format_duration(v.duration)})"
-
-        self.video_panel.refresh(self.project.videos, format_video)
+        self.video_panel.refresh(
+            self.project.videos,
+            lambda v: f"{v.name}  ({format_duration(v.duration)})"
+        )
 
     def _refresh_audio_list(self) -> None:
         """Refresh the audio list display."""
         def format_track(t: AudioTrack) -> str:
             tag = "[S]" if t.solo else ("[M]" if t.mute else "   ")
             return f"{tag} {t.name}  ({format_duration(t.duration)})"
-
         self.audio_panel.refresh(self.project.audio_tracks, format_track)
 
     def _update_durations(self) -> None:
@@ -607,7 +488,6 @@ class VideoMusiqueApp:
         """Update button enabled states."""
         has_videos = len(self.project.videos) > 0
         state = tk.NORMAL if has_videos else tk.DISABLED
-
         self.btn_preview_short.config(state=state)
         self.btn_preview_full.config(state=state)
         self.btn_export.config(state=state)
@@ -616,108 +496,24 @@ class VideoMusiqueApp:
 
     def _new_project(self) -> None:
         """Create a new project."""
-        if self.project.videos or self.project.audio_tracks:
-            if not messagebox.askyesno("Nouveau projet", "Voulez-vous creer un nouveau projet? Les modifications non sauvegardees seront perdues."):
-                return
-
-        self.project = Project()
-        self._refresh_video_list()
-        self._refresh_audio_list()
-        self._update_durations()
-        self._update_button_states()
-        self._reset_options()
-        self.progress_panel.reset()
+        new_project = self.project_ctrl.new_project(self.project)
+        if new_project is not None:
+            self.project = new_project
+            self._refresh_all()
+            self._reset_options()
+            self.progress_panel.reset()
 
     def _save_project(self) -> None:
         """Save the current project."""
-        if not self.project.videos:
-            messagebox.showinfo("Information", "Ajoutez au moins une video.")
-            return
-
-        file_path = filedialog.asksaveasfilename(
-            title="Sauvegarder le projet",
-            defaultextension=".mixproj",
-            filetypes=[("Projet Video-Musique", "*.mixproj")],
-            initialdir=self.config.last_directory
-        )
-
-        if file_path:
-            self._sync_settings()
-            if ProjectManager.save_project(self.project, file_path):
-                self.progress_panel.set_status(f"Projet sauvegarde: {Path(file_path).name}")
-                self._logger.info(f"Project saved successfully: {file_path}")
-            else:
-                self._logger.error(f"Failed to save project: {file_path}")
-                messagebox.showerror(
-                    "Erreur de sauvegarde",
-                    f"Impossible de sauvegarder le projet.\n\n"
-                    f"Verifiez que vous avez les droits d'ecriture\n"
-                    f"dans le dossier selectionne."
-                )
+        self.project_ctrl.save_project(self.project, self._sync_settings)
 
     def _load_project(self) -> None:
         """Load a project from file."""
-        file_path = filedialog.askopenfilename(
-            title="Ouvrir un projet",
-            defaultextension=".mixproj",
-            filetypes=[("Projet Video-Musique", "*.mixproj")],
-            initialdir=self.config.last_directory
-        )
-
-        if not file_path:
-            return
-
-        data = ProjectManager.load_project_data(file_path)
-        if not data:
-            self._logger.error(f"Failed to load project: {file_path}")
-            messagebox.showerror(
-                "Erreur de chargement",
-                f"Impossible de charger le projet.\n\n"
-                f"Le fichier est peut-etre corrompu ou\n"
-                f"dans un format non supporte."
-            )
-            return
-
-        # Load videos
-        self.project.videos.clear()
-        for vd in data.get("videos", []):
-            path = vd["path"]
-            if not os.path.exists(path):
-                path = filedialog.askopenfilename(
-                    title=f"Localiser {os.path.basename(vd['path'])}",
-                    filetypes=[("Videos", "*.mp4 *.mkv *.mov *.avi *.webm")]
-                )
-                if not path:
-                    continue
-
-            duration = self.ffmpeg.get_duration(path)
-            self.project.videos.append(VideoClip.from_dict({"path": path, "name": vd.get("name", "")}, duration))
-
-        # Load audio tracks
-        self.project.audio_tracks.clear()
-        for td in data.get("audio_tracks", []):
-            path = td["path"]
-            if not os.path.exists(path):
-                path = filedialog.askopenfilename(
-                    title=f"Localiser {os.path.basename(td['path'])}",
-                    filetypes=[("Audio", "*.mp3 *.wav *.flac *.aac *.ogg")]
-                )
-                if not path:
-                    continue
-
-            duration = self.ffmpeg.get_duration(path)
-            self.project.audio_tracks.append(AudioTrack.from_dict({**td, "path": path}, duration))
-
-        # Load settings
-        self.project.settings = ProjectSettings.from_dict(data.get("settings", {}))
-
-        # Update UI
-        self._refresh_video_list()
-        self._refresh_audio_list()
-        self._apply_settings()
-        self._update_durations()
-        self._update_button_states()
-        self.progress_panel.set_status(f"Projet charge: {Path(file_path).name}")
+        loaded_project = self.project_ctrl.load_project()
+        if loaded_project is not None:
+            self.project = loaded_project
+            self._refresh_all()
+            self._apply_settings()
 
     def _sync_settings(self) -> None:
         """Sync UI values to project settings."""
@@ -728,12 +524,7 @@ class VideoMusiqueApp:
         self.project.settings.music_volume = self.volume_panel.get_music_volume()
         self.project.settings.use_gpu = self.var_use_gpu.get()
 
-        # Map speed preset from UI to internal value
-        preset_map = {
-            "Rapide": "fast",
-            "Equilibre": "balanced",
-            "Qualite": "quality",
-        }
+        preset_map = {"Rapide": "fast", "Equilibre": "balanced", "Qualite": "quality"}
         self.project.settings.speed_preset = preset_map.get(self.speed_combo.get(), "balanced")
 
         try:
@@ -755,16 +546,11 @@ class VideoMusiqueApp:
         self.volume_panel.set_video_volume(s.video_volume)
         self.volume_panel.set_music_volume(s.music_volume)
 
-        # GPU and speed settings
         gpu_info = self.ffmpeg.get_gpu_info()
         if gpu_info['available']:
             self.var_use_gpu.set(s.use_gpu)
 
-        preset_map = {
-            "fast": "Rapide",
-            "balanced": "Equilibre",
-            "quality": "Qualite",
-        }
+        preset_map = {"fast": "Rapide", "balanced": "Equilibre", "quality": "Qualite"}
         self.speed_combo.set(preset_map.get(s.speed_preset, "Equilibre"))
 
         self.spin_audio_crossfade.delete(0, tk.END)
@@ -781,7 +567,6 @@ class VideoMusiqueApp:
         self.volume_panel.set_video_volume(100)
         self.volume_panel.set_music_volume(70)
 
-        # Reset performance settings
         gpu_info = self.ffmpeg.get_gpu_info()
         if gpu_info['available']:
             self.var_use_gpu.set(True)
@@ -789,7 +574,6 @@ class VideoMusiqueApp:
 
         self.spin_audio_crossfade.delete(0, tk.END)
         self.spin_audio_crossfade.insert(0, "10")
-
         self.spin_video_crossfade.delete(0, tk.END)
         self.spin_video_crossfade.insert(0, "1.0")
 
@@ -797,106 +581,29 @@ class VideoMusiqueApp:
 
     def _play_preview(self, clip: bool = True) -> None:
         """Start preview playback."""
-        if not self.project.videos:
-            return
-
         self._sync_settings()
+        self.preview_ctrl.start_preview(self.project, clip)
+
+    def _on_preview_start(self) -> None:
+        """Handle preview start."""
         self.btn_preview_short.config(state=tk.DISABLED)
         self.btn_preview_full.config(state=tk.DISABLED)
         self.btn_stop_preview.config(state=tk.NORMAL)
-        self.progress_panel.set_status("Generation de la preview...")
         self.progress_panel.start_animation()
 
-        threading.Thread(
-            target=self._build_preview,
-            args=(clip,),
-            daemon=True
-        ).start()
-
-    def _build_preview(self, clip: bool) -> None:
-        """Build and play preview (runs in thread) with GPU acceleration."""
-        try:
-            self._stop_preview()
-
-            clip_seconds = 60 if clip else None
-            # Use GPU acceleration for faster preview generation
-            self.temp_preview = self.ffmpeg.create_preview(
-                self.project,
-                clip_seconds,
-                use_gpu=self.project.settings.use_gpu
-            )
-
-            if self.temp_preview:
-                self.preview_active = True
-                self.preview_process = self.ffmpeg.play_preview(self.temp_preview)
-
-                if self.preview_process:
-                    threading.Thread(target=self._watch_preview, daemon=True).start()
-                else:
-                    self.root.after(0, self._reset_preview_ui)
-
-                self.root.after(0, lambda: self.progress_panel.set_status("Preview en cours..."))
-            else:
-                self._logger.error("Preview generation failed - no temp file created")
-                self.root.after(0, lambda: messagebox.showerror(
-                    "Erreur de preview",
-                    "Impossible de generer la preview.\n\n"
-                    "Causes possibles:\n"
-                    "- FFmpeg non installe ou non accessible\n"
-                    "- Fichiers video corrompus ou non supportes\n"
-                    "- Espace disque insuffisant\n\n"
-                    "Consultez les logs pour plus de details."
-                ))
-                self.root.after(0, self._reset_preview_ui)
-
-        except Exception as e:
-            self._logger.exception(f"Preview failed with exception: {e}")
-            self.root.after(0, lambda: messagebox.showerror(
-                "Erreur de preview",
-                f"Une erreur inattendue s'est produite:\n{str(e)}"
-            ))
-            self.root.after(0, self._reset_preview_ui)
-
-        finally:
-            self.root.after(0, self.progress_panel.stop_animation)
-            self.root.after(0, lambda: (
-                self.btn_preview_short.config(state=tk.NORMAL if self.project.videos else tk.DISABLED),
-                self.btn_preview_full.config(state=tk.NORMAL if self.project.videos else tk.DISABLED)
-            ))
-
-    def _watch_preview(self) -> None:
-        """Watch for preview process end."""
-        try:
-            if self.preview_process:
-                self.preview_process.wait()
-        finally:
-            self.root.after(0, self._stop_preview)
+    def _on_preview_stop(self) -> None:
+        """Handle preview stop."""
+        has_videos = len(self.project.videos) > 0
+        self.btn_preview_short.config(state=tk.NORMAL if has_videos else tk.DISABLED)
+        self.btn_preview_full.config(state=tk.NORMAL if has_videos else tk.DISABLED)
+        self.btn_stop_preview.config(state=tk.DISABLED)
+        self.progress_panel.stop_animation()
+        self.progress_panel.set_progress(0)
 
     def _stop_preview(self) -> None:
         """Stop preview playback."""
-        self.preview_active = False
-        self.btn_stop_preview.config(state=tk.DISABLED)
-        self.progress_panel.stop_animation()
-
-        try:
-            if self.preview_process:
-                self.preview_process.kill()
-        except Exception:
-            pass
-        self.preview_process = None
-
-        if self.temp_preview and os.path.exists(self.temp_preview):
-            try:
-                os.remove(self.temp_preview)
-            except Exception:
-                pass
-        self.temp_preview = None
-
-        self.progress_panel.set_progress(0)
-
-    def _reset_preview_ui(self) -> None:
-        """Reset preview UI state."""
-        self._stop_preview()
+        self.preview_ctrl.stop()
+        self._on_preview_stop()
         self.progress_panel.set_status("Pret")
 
     # ─────────── Export Operations ───────────
@@ -917,97 +624,24 @@ class VideoMusiqueApp:
         if output_path:
             self.config.last_directory = os.path.dirname(output_path)
             self._sync_settings()
-            threading.Thread(
-                target=self._run_export,
-                args=(output_path,),
-                daemon=True
-            ).start()
+            self.export_ctrl.start_export(self.project, output_path)
 
-    def _run_export(self, output_path: str) -> None:
-        """Run export in background thread with GPU acceleration support."""
-        self._export_cancelled = False
-        self.export_start = time.time()
-        self.root.after(0, self._update_elapsed)
-
-        # Show encoder info in status
-        use_gpu = self.project.settings.use_gpu
-        gpu_info = self.ffmpeg.get_gpu_info()
-        encoder_text = f"GPU {gpu_info['type'].upper()}" if (use_gpu and gpu_info['available']) else "CPU"
-        self.root.after(0, lambda: self.progress_panel.set_status(f"Export en cours ({encoder_text})..."))
-        self.root.after(0, lambda: self.btn_export.config(state=tk.DISABLED))
-        self.root.after(0, lambda: self.btn_cancel_export.config(state=tk.NORMAL))
-        self.root.after(0, self.progress_panel.start_animation)
-
-        self._logger.info(f"Starting export to {output_path}")
-
-        def progress_callback(percent: float):
-            self.root.after(0, lambda: self.progress_panel.set_progress(percent))
-
-        def cancel_check() -> bool:
-            return self._export_cancelled
-
-        # Export with performance settings
-        result = self.ffmpeg.export(
-            self.project,
-            output_path,
-            progress_callback,
-            use_gpu=self.project.settings.use_gpu,
-            speed_preset=self.project.settings.speed_preset,
-            cancel_check=cancel_check
-        )
-
-        self.root.after(0, self._export_done)
-
-        if result.get("cancelled"):
-            self.root.after(0, lambda: self.progress_panel.set_status("Export annule"))
-            self._logger.info("Export was cancelled by user")
-        elif result.get("success"):
-            elapsed = time.time() - self.export_start
-            self.root.after(0, lambda: self.progress_panel.set_status(f"Export termine! ({elapsed:.1f}s)"))
-            self._logger.log_export_complete(output_path, elapsed, success=True)
-        else:
-            error_msg = result.get("error", "Erreur inconnue")
-            self._logger.log_export_complete(output_path, 0, success=False)
-
-            # Show user-friendly error message
-            def show_error():
-                messagebox.showerror(
-                    "Erreur d'export",
-                    f"L'export a echoue.\n\nDetails:\n{error_msg}\n\n"
-                    "Consultez les logs pour plus d'informations."
-                )
-                self.progress_panel.set_status("Export echoue")
-
-            self.root.after(0, show_error)
+    def _on_export_start(self) -> None:
+        """Handle export start."""
+        self.btn_export.config(state=tk.DISABLED)
+        self.btn_cancel_export.config(state=tk.NORMAL)
+        self.progress_panel.start_animation()
 
     def _cancel_export(self) -> None:
         """Cancel the current export."""
-        if not self._export_cancelled:
-            self._export_cancelled = True
-            self._logger.info("Export cancellation requested")
-            self.progress_panel.set_status("Annulation en cours...")
-            self.btn_cancel_export.config(state=tk.DISABLED)
+        self.export_ctrl.cancel()
+        self.btn_cancel_export.config(state=tk.DISABLED)
+        self._on_export_done()
 
-    def _update_elapsed(self) -> None:
-        """Update elapsed time display."""
-        if self.export_start is None:
-            return
-
-        elapsed = time.time() - self.export_start
-        self.progress_panel.set_time(elapsed)
-        self._elapsed_job = self.root.after(500, self._update_elapsed)
-
-    def _export_done(self) -> None:
+    def _on_export_done(self) -> None:
         """Handle export completion."""
-        if self._elapsed_job:
-            self.root.after_cancel(self._elapsed_job)
-            self._elapsed_job = None
-
-        self.export_start = None
-        self._export_cancelled = False
         self.progress_panel.stop_animation()
-        if not self._export_cancelled:
-            self.progress_panel.set_progress(100)
+        self.progress_panel.set_progress(100)
         self.btn_export.config(state=tk.NORMAL if self.project.videos else tk.DISABLED)
         self.btn_cancel_export.config(state=tk.DISABLED)
 
@@ -1015,9 +649,6 @@ class VideoMusiqueApp:
 
     def _on_closing(self) -> None:
         """Handle window close."""
-        self._stop_preview()
-
-        # Save window size
+        self.preview_ctrl.stop()
         self.config.window_size = (self.root.winfo_width(), self.root.winfo_height())
-
         self.root.destroy()
