@@ -6,6 +6,7 @@ Modern and intuitive interface
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -21,6 +22,7 @@ from ..core.models import AudioTrack, VideoClip, Project, ProjectSettings
 from ..core.ffmpeg import FFmpegProcessor
 from ..core.config import Config, ProjectManager
 from ..utils.helpers import format_duration, get_file_size, create_tooltip
+from ..utils.logger import get_logger
 
 
 class VideoMusiqueApp:
@@ -42,10 +44,13 @@ class VideoMusiqueApp:
 
         # State
         self.preview_active = False
-        self.preview_process: Optional[object] = None
+        self.preview_process: Optional[subprocess.Popen] = None
         self.temp_preview: Optional[str] = None
         self.export_start: Optional[float] = None
         self._elapsed_job: Optional[str] = None
+        self._export_cancelled = False
+        self._export_process: Optional[subprocess.Popen] = None
+        self._logger = get_logger()
 
         # Cleanup temp files on start
         FFmpegProcessor.cleanup_temp_files()
@@ -340,14 +345,26 @@ class VideoMusiqueApp:
         )
         self.btn_stop_preview.pack(side=tk.LEFT)
 
-        # Export button
+        # Export buttons frame
+        export_frame = ttk.Frame(action_frame, style="Card.TFrame")
+        export_frame.grid(row=0, column=3, sticky="e")
+
         self.btn_export = ttk.Button(
-            action_frame,
+            export_frame,
             text="Exporter",
             command=self._export,
             state=tk.DISABLED
         )
-        self.btn_export.grid(row=0, column=3, sticky="e")
+        self.btn_export.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_cancel_export = ttk.Button(
+            export_frame,
+            text="Annuler",
+            style="Danger.TButton",
+            command=self._cancel_export,
+            state=tk.DISABLED
+        )
+        self.btn_cancel_export.pack(side=tk.LEFT)
 
         # Progress panel
         self.progress_panel = ProgressPanel(footer)
@@ -628,8 +645,15 @@ class VideoMusiqueApp:
             self._sync_settings()
             if ProjectManager.save_project(self.project, file_path):
                 self.progress_panel.set_status(f"Projet sauvegarde: {Path(file_path).name}")
+                self._logger.info(f"Project saved successfully: {file_path}")
             else:
-                messagebox.showerror("Erreur", "Impossible de sauvegarder le projet.")
+                self._logger.error(f"Failed to save project: {file_path}")
+                messagebox.showerror(
+                    "Erreur de sauvegarde",
+                    f"Impossible de sauvegarder le projet.\n\n"
+                    f"Verifiez que vous avez les droits d'ecriture\n"
+                    f"dans le dossier selectionne."
+                )
 
     def _load_project(self) -> None:
         """Load a project from file."""
@@ -645,7 +669,13 @@ class VideoMusiqueApp:
 
         data = ProjectManager.load_project_data(file_path)
         if not data:
-            messagebox.showerror("Erreur", "Impossible de charger le projet.")
+            self._logger.error(f"Failed to load project: {file_path}")
+            messagebox.showerror(
+                "Erreur de chargement",
+                f"Impossible de charger le projet.\n\n"
+                f"Le fichier est peut-etre corrompu ou\n"
+                f"dans un format non supporte."
+            )
             return
 
         # Load videos
@@ -807,11 +837,24 @@ class VideoMusiqueApp:
 
                 self.root.after(0, lambda: self.progress_panel.set_status("Preview en cours..."))
             else:
-                self.root.after(0, lambda: messagebox.showerror("Erreur", "Impossible de generer la preview."))
+                self._logger.error("Preview generation failed - no temp file created")
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Erreur de preview",
+                    "Impossible de generer la preview.\n\n"
+                    "Causes possibles:\n"
+                    "- FFmpeg non installe ou non accessible\n"
+                    "- Fichiers video corrompus ou non supportes\n"
+                    "- Espace disque insuffisant\n\n"
+                    "Consultez les logs pour plus de details."
+                ))
                 self.root.after(0, self._reset_preview_ui)
 
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Erreur", str(e)))
+            self._logger.exception(f"Preview failed with exception: {e}")
+            self.root.after(0, lambda: messagebox.showerror(
+                "Erreur de preview",
+                f"Une erreur inattendue s'est produite:\n{str(e)}"
+            ))
             self.root.after(0, self._reset_preview_ui)
 
         finally:
@@ -882,6 +925,7 @@ class VideoMusiqueApp:
 
     def _run_export(self, output_path: str) -> None:
         """Run export in background thread with GPU acceleration support."""
+        self._export_cancelled = False
         self.export_start = time.time()
         self.root.after(0, self._update_elapsed)
 
@@ -891,27 +935,58 @@ class VideoMusiqueApp:
         encoder_text = f"GPU {gpu_info['type'].upper()}" if (use_gpu and gpu_info['available']) else "CPU"
         self.root.after(0, lambda: self.progress_panel.set_status(f"Export en cours ({encoder_text})..."))
         self.root.after(0, lambda: self.btn_export.config(state=tk.DISABLED))
+        self.root.after(0, lambda: self.btn_cancel_export.config(state=tk.NORMAL))
         self.root.after(0, self.progress_panel.start_animation)
+
+        self._logger.info(f"Starting export to {output_path}")
 
         def progress_callback(percent: float):
             self.root.after(0, lambda: self.progress_panel.set_progress(percent))
 
+        def cancel_check() -> bool:
+            return self._export_cancelled
+
         # Export with performance settings
-        success = self.ffmpeg.export(
+        result = self.ffmpeg.export(
             self.project,
             output_path,
             progress_callback,
             use_gpu=self.project.settings.use_gpu,
-            speed_preset=self.project.settings.speed_preset
+            speed_preset=self.project.settings.speed_preset,
+            cancel_check=cancel_check
         )
 
         self.root.after(0, self._export_done)
 
-        if success:
+        if result.get("cancelled"):
+            self.root.after(0, lambda: self.progress_panel.set_status("Export annule"))
+            self._logger.info("Export was cancelled by user")
+        elif result.get("success"):
             elapsed = time.time() - self.export_start
             self.root.after(0, lambda: self.progress_panel.set_status(f"Export termine! ({elapsed:.1f}s)"))
+            self._logger.log_export_complete(output_path, elapsed, success=True)
         else:
-            self.root.after(0, lambda: messagebox.showerror("Erreur", "L'export a echoue."))
+            error_msg = result.get("error", "Erreur inconnue")
+            self._logger.log_export_complete(output_path, 0, success=False)
+
+            # Show user-friendly error message
+            def show_error():
+                messagebox.showerror(
+                    "Erreur d'export",
+                    f"L'export a echoue.\n\nDetails:\n{error_msg}\n\n"
+                    "Consultez les logs pour plus d'informations."
+                )
+                self.progress_panel.set_status("Export echoue")
+
+            self.root.after(0, show_error)
+
+    def _cancel_export(self) -> None:
+        """Cancel the current export."""
+        if not self._export_cancelled:
+            self._export_cancelled = True
+            self._logger.info("Export cancellation requested")
+            self.progress_panel.set_status("Annulation en cours...")
+            self.btn_cancel_export.config(state=tk.DISABLED)
 
     def _update_elapsed(self) -> None:
         """Update elapsed time display."""
@@ -929,9 +1004,12 @@ class VideoMusiqueApp:
             self._elapsed_job = None
 
         self.export_start = None
+        self._export_cancelled = False
         self.progress_panel.stop_animation()
-        self.progress_panel.set_progress(100)
+        if not self._export_cancelled:
+            self.progress_panel.set_progress(100)
         self.btn_export.config(state=tk.NORMAL if self.project.videos else tk.DISABLED)
+        self.btn_cancel_export.config(state=tk.DISABLED)
 
     # ─────────── Cleanup ───────────
 

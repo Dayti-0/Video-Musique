@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
 
 from .models import AudioTrack, VideoClip, Project
+from ..utils.logger import get_logger
 
 
 class FFmpegProcessor:
@@ -49,6 +50,7 @@ class FFmpegProcessor:
         self._cache_lock = threading.Lock()
         self._available_gpu_encoder: Optional[str] = None
         self._gpu_checked = False
+        self._logger = get_logger()
         self._check_dependencies()
 
     def _check_dependencies(self) -> None:
@@ -92,11 +94,17 @@ class FFmpegProcessor:
                     # Verify encoder actually works with a test
                     if self._test_gpu_encoder(encoder_name, gpu_type):
                         self._available_gpu_encoder = gpu_type
+                        self._logger.log_gpu_detection(gpu_type, encoder_name)
                         return gpu_type
 
-        except Exception:
-            pass
+        except subprocess.TimeoutExpired:
+            self._logger.warning("GPU detection timed out")
+        except FileNotFoundError:
+            self._logger.warning("FFmpeg not found during GPU detection")
+        except Exception as e:
+            self._logger.error(f"GPU detection failed: {e}")
 
+        self._logger.log_gpu_detection(None, None)
         return None
 
     def _test_gpu_encoder(self, encoder: str, gpu_type: str) -> bool:
@@ -116,7 +124,11 @@ class FFmpegProcessor:
 
             result = subprocess.run(cmd, capture_output=True, timeout=10)
             return result.returncode == 0
-        except Exception:
+        except subprocess.TimeoutExpired:
+            self._logger.debug(f"GPU encoder test timed out: {encoder}")
+            return False
+        except Exception as e:
+            self._logger.debug(f"GPU encoder test failed for {encoder}: {e}")
             return False
 
     def get_gpu_info(self) -> dict:
@@ -128,13 +140,13 @@ class FFmpegProcessor:
             "encoder": self.GPU_ENCODERS.get(gpu, {}).get("encoder") if gpu else None,
         }
 
-    @staticmethod
-    def _sexagesimal(s: str) -> float:
+    def _sexagesimal(self, s: str) -> float:
         """Convert 'HH:MM:SS.xx' to seconds."""
         try:
             h, m, sec = s.split(":")
             return int(h) * 3600 + int(m) * 60 + float(sec)
-        except Exception:
+        except (ValueError, AttributeError) as e:
+            self._logger.debug(f"Failed to parse time string '{s}': {e}")
             return 0.0
 
     def _get_cache_key(self, path: str) -> str:
@@ -142,7 +154,8 @@ class FFmpegProcessor:
         try:
             mtime = os.path.getmtime(path)
             return f"{path}:{mtime}"
-        except Exception:
+        except OSError as e:
+            self._logger.debug(f"Could not get mtime for {path}: {e}")
             return path
 
     def get_duration(self, path: str) -> float:
@@ -229,7 +242,8 @@ class FFmpegProcessor:
                 idx, path = future_to_path[future]
                 try:
                     results[idx] = future.result()
-                except Exception:
+                except Exception as e:
+                    self._logger.warning(f"Failed to get duration for {path}: {e}")
                     results[idx] = 0.0
 
         # Return results in original order
@@ -261,8 +275,10 @@ class FFmpegProcessor:
             ).strip()
             if out and out != "N/A":
                 return float(out)
-        except Exception:
-            pass
+        except subprocess.CalledProcessError as e:
+            self._logger.debug(f"ffprobe quick failed for {path}: exit code {e.returncode}")
+        except (ValueError, FileNotFoundError) as e:
+            self._logger.debug(f"ffprobe quick failed for {path}: {e}")
         return 0.0
 
     def _duration_ffprobe_json(self, path: str) -> float:
@@ -293,8 +309,10 @@ class FFmpegProcessor:
 
             if durations:
                 return max(durations)
-        except Exception:
-            pass
+        except subprocess.CalledProcessError as e:
+            self._logger.debug(f"ffprobe JSON failed for {path}: exit code {e.returncode}")
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            self._logger.debug(f"ffprobe JSON parse failed for {path}: {e}")
         return 0.0
 
     def _duration_mutagen(self, path: str) -> float:
@@ -305,9 +323,9 @@ class FFmpegProcessor:
             if m and m.info and hasattr(m.info, "length"):
                 return float(m.info.length)
         except ImportError:
-            pass
-        except Exception:
-            pass
+            self._logger.debug("mutagen library not available")
+        except Exception as e:
+            self._logger.debug(f"mutagen failed for {path}: {e}")
         return 0.0
 
     def _duration_wave(self, path: str) -> float:
@@ -317,8 +335,10 @@ class FFmpegProcessor:
                 frames, rate = w.getnframes(), w.getframerate()
                 if rate:
                     return frames / float(rate)
-        except Exception:
-            pass
+        except wave.Error as e:
+            self._logger.debug(f"wave module failed for {path}: {e}")
+        except OSError as e:
+            self._logger.debug(f"Could not open WAV file {path}: {e}")
         return 0.0
 
     def _duration_ffmpeg(self, path: str) -> float:
@@ -332,8 +352,10 @@ class FFmpegProcessor:
             if match:
                 h, m, s = map(float, match.groups())
                 return h * 3600 + m * 60 + s
-        except Exception:
-            pass
+        except subprocess.CalledProcessError as e:
+            self._logger.debug(f"ffmpeg duration failed for {path}: exit code {e.returncode}")
+        except (FileNotFoundError, ValueError) as e:
+            self._logger.debug(f"ffmpeg duration failed for {path}: {e}")
         return 0.0
 
     def build_audio_crossfade_filter(
@@ -546,6 +568,7 @@ class FFmpegProcessor:
             cmd.extend(["-t", str(preview_seconds)])
 
         cmd.append(output_path)
+        self._logger.log_ffmpeg_command(cmd)
         return cmd
 
     def export(
@@ -554,8 +577,9 @@ class FFmpegProcessor:
         output_path: str,
         progress_callback: Optional[Callable[[float], None]] = None,
         use_gpu: bool = True,
-        speed_preset: str = "balanced"
-    ) -> bool:
+        speed_preset: str = "balanced",
+        cancel_check: Optional[Callable[[], bool]] = None
+    ) -> dict:
         """
         Export project to file with GPU acceleration support.
 
@@ -565,10 +589,18 @@ class FFmpegProcessor:
             progress_callback: Optional callback for progress updates (0-100)
             use_gpu: Whether to use GPU acceleration if available
             speed_preset: Speed preset (ultrafast, fast, balanced, quality)
+            cancel_check: Optional callable that returns True if export should be cancelled
 
         Returns:
-            True on success, False on failure.
+            Dictionary with:
+                - success: bool
+                - cancelled: bool
+                - error: Optional error message
         """
+        self._logger.log_export_start(output_path, use_gpu, speed_preset)
+
+        result = {"success": False, "cancelled": False, "error": None}
+
         cmd = self.build_export_command(
             project, output_path,
             use_gpu=use_gpu,
@@ -580,7 +612,7 @@ class FFmpegProcessor:
         last_progress = 0
 
         try:
-            with subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -589,9 +621,29 @@ class FFmpegProcessor:
                 universal_newlines=True,
                 encoding="utf-8",
                 errors="replace"
-            ) as proc:
+            )
+
+            try:
                 # Read stdout for progress
                 for line in proc.stdout:
+                    # Check for cancellation
+                    if cancel_check and cancel_check():
+                        self._logger.info("Export cancelled by user")
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                        result["cancelled"] = True
+                        # Remove incomplete output file
+                        if os.path.exists(output_path):
+                            try:
+                                os.remove(output_path)
+                                self._logger.debug(f"Removed incomplete file: {output_path}")
+                            except OSError:
+                                pass
+                        return result
+
                     if m := self.time_regex.search(line):
                         pos = int(m.group(1))
                         progress = min(pos / total_ms * 100, 100)
@@ -601,9 +653,34 @@ class FFmpegProcessor:
                             progress_callback(progress)
                             last_progress = progress
 
-                return proc.wait() == 0
-        except Exception:
-            return False
+                return_code = proc.wait()
+                result["success"] = return_code == 0
+
+                if not result["success"]:
+                    # Try to get error message from stderr
+                    stderr_output = proc.stderr.read() if proc.stderr else ""
+                    error_lines = [l for l in stderr_output.split('\n') if l.strip()]
+                    if error_lines:
+                        # Get last few meaningful lines
+                        result["error"] = "\n".join(error_lines[-3:])
+                    else:
+                        result["error"] = f"FFmpeg exited with code {return_code}"
+                    self._logger.error(f"Export failed: {result['error']}")
+
+            finally:
+                proc.stdout.close()
+                proc.stderr.close()
+
+            return result
+
+        except FileNotFoundError:
+            result["error"] = "FFmpeg non trouve. Verifiez que FFmpeg est installe."
+            self._logger.error(result["error"])
+            return result
+        except Exception as e:
+            result["error"] = str(e)
+            self._logger.exception(f"Export failed with exception: {e}")
+            return result
 
     def export_with_stats(
         self,
@@ -611,13 +688,16 @@ class FFmpegProcessor:
         output_path: str,
         progress_callback: Optional[Callable[[float], None]] = None,
         use_gpu: bool = True,
-        speed_preset: str = "balanced"
+        speed_preset: str = "balanced",
+        cancel_check: Optional[Callable[[], bool]] = None
     ) -> dict:
         """
         Export with detailed statistics.
 
         Returns dict with:
             - success: bool
+            - cancelled: bool
+            - error: Optional error message
             - encoder: str (encoder used)
             - gpu_accelerated: bool
             - duration_seconds: float (time taken)
@@ -628,18 +708,20 @@ class FFmpegProcessor:
         gpu_type = self.detect_gpu_encoder() if use_gpu else None
         encoder = self.GPU_ENCODERS.get(gpu_type, {}).get("encoder", "libx264") if gpu_type else "libx264"
 
-        success = self.export(
+        result = self.export(
             project, output_path, progress_callback,
-            use_gpu=use_gpu, speed_preset=speed_preset
+            use_gpu=use_gpu, speed_preset=speed_preset,
+            cancel_check=cancel_check
         )
 
-        return {
-            "success": success,
+        result.update({
             "encoder": encoder,
             "gpu_accelerated": gpu_type is not None,
             "gpu_type": gpu_type,
             "duration_seconds": time.time() - start_time,
-        }
+        })
+
+        return result
 
     def create_preview(
         self,
@@ -652,6 +734,8 @@ class FFmpegProcessor:
         Returns the path to the temporary file, or None on failure.
         Automatically falls back to CPU encoding if GPU fails.
         """
+        self._logger.log_preview_start(clip_seconds)
+
         fd, temp_path = tempfile.mkstemp(suffix=".mkv")
         os.close(fd)
 
@@ -674,16 +758,21 @@ class FFmpegProcessor:
                     timeout=300  # 5 minute timeout
                 )
                 if result.returncode == 0:
+                    self._logger.info(f"Preview created successfully using {mode}")
                     return temp_path
                 # If GPU failed, try CPU fallback
                 if try_gpu and mode == "GPU":
+                    self._logger.warning(f"GPU preview failed, falling back to CPU")
                     continue
+                else:
+                    self._logger.error(f"Preview generation failed: exit code {result.returncode}")
             except subprocess.TimeoutExpired:
-                pass
-            except Exception:
-                pass
+                self._logger.warning(f"Preview generation timed out ({mode})")
+            except Exception as e:
+                self._logger.error(f"Preview generation failed ({mode}): {e}")
 
         # All attempts failed
+        self._logger.error("All preview generation attempts failed")
         if os.path.exists(temp_path):
             os.remove(temp_path)
         return None
@@ -705,10 +794,18 @@ class FFmpegProcessor:
                 subprocess.Popen(["xdg-open", file_path])
             return None
 
-    @staticmethod
-    def cleanup_temp_files() -> None:
-        """Clean up temporary files created by the application."""
+    @classmethod
+    def cleanup_temp_files(cls) -> int:
+        """
+        Clean up temporary files created by the application.
+
+        Returns:
+            Number of files removed.
+        """
+        logger = get_logger()
         temp_dir = tempfile.gettempdir()
+        removed = 0
+
         try:
             for file in os.listdir(temp_dir):
                 file_path = os.path.join(temp_dir, file)
@@ -719,7 +816,14 @@ class FFmpegProcessor:
                 ):
                     try:
                         os.remove(file_path)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                        removed += 1
+                        logger.debug(f"Removed temp file: {file_path}")
+                    except OSError as e:
+                        logger.warning(f"Could not remove temp file {file_path}: {e}")
+        except OSError as e:
+            logger.warning(f"Could not list temp directory: {e}")
+
+        if removed > 0:
+            logger.info(f"Cleaned up {removed} temporary file(s)")
+
+        return removed

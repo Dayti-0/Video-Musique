@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
+from ..utils.logger import get_logger
+
 
 class Config:
     """Application configuration manager."""
@@ -34,6 +36,7 @@ class Config:
     def __init__(self, config_file: Optional[Path] = None):
         self.config_file = config_file or self.DEFAULT_CONFIG_FILE
         self._data: dict[str, Any] = {}
+        self._logger = get_logger()
         self.load()
 
     def load(self) -> None:
@@ -42,18 +45,25 @@ class Config:
             try:
                 with open(self.config_file, "r", encoding="utf-8") as f:
                     self._data = json.load(f)
-            except Exception:
+                self._logger.debug(f"Configuration loaded from {self.config_file}")
+            except json.JSONDecodeError as e:
+                self._logger.warning(f"Invalid JSON in config file: {e}")
+                self._data = {}
+            except OSError as e:
+                self._logger.warning(f"Could not read config file: {e}")
                 self._data = {}
         else:
             self._data = {}
+            self._logger.debug("No existing config file, using defaults")
 
     def save(self) -> None:
         """Save configuration to file."""
         try:
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=2)
-        except Exception:
-            pass
+            self._logger.debug("Configuration saved")
+        except OSError as e:
+            self._logger.error(f"Could not save config file: {e}")
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value."""
@@ -105,12 +115,17 @@ class ProjectManager:
         Save project to file.
         Returns True on success, False on failure.
         """
+        logger = get_logger()
         try:
             data = project.to_dict()
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+            logger.log_file_operation("save", file_path, success=True)
+            logger.info(f"Project saved: {file_path}")
             return True
-        except Exception:
+        except (OSError, TypeError) as e:
+            logger.log_file_operation("save", file_path, success=False)
+            logger.error(f"Failed to save project: {e}")
             return False
 
     @staticmethod
@@ -119,8 +134,18 @@ class ProjectManager:
         Load project data from file.
         Returns dict on success, None on failure.
         """
+        logger = get_logger()
         try:
             with open(file_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
+                data = json.load(f)
+            logger.log_file_operation("load", file_path, success=True)
+            logger.info(f"Project loaded: {file_path}")
+            return data
+        except json.JSONDecodeError as e:
+            logger.log_file_operation("load", file_path, success=False)
+            logger.error(f"Invalid project file format: {e}")
+            return None
+        except OSError as e:
+            logger.log_file_operation("load", file_path, success=False)
+            logger.error(f"Failed to load project: {e}")
             return None
